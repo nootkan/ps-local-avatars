@@ -358,7 +358,8 @@ class PS_Local_Avatars {
 
         $avatar_id = (int) get_user_meta($user->ID, self::META_AVATAR_ID, true);
         if (!$avatar_id) return $args;
-$size = isset($args['size']) ? (int)$args['size'] : 96;
+        $size = isset($args['size']) ? (int)$args['size'] : 96;
+		$opts = $this->get_options();
         $use_small = false;
         if (!is_admin() && $opts['serve_small_in_comments'] && $this->is_comment_context($id_or_email)) {
             $use_small = true;
