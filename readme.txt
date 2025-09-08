@@ -45,6 +45,7 @@ Yes. Enable a fallback filter on `get_avatar` to replace the `<img>` markup. (Th
 = 1.3.7 =
 * Compatibility: Ensure ClassicPress profile & Admin Bar use local avatars by also covering `get_avatar_url`.
 * Admin safety: In admin/when the Admin Bar shows, keep avatars visible even if the global “Show Avatars” toggle is off (ClassicPress quirk).
+* Fixed remove avatar issue for logged in users
 * UX: Add a clear “Heads up” note below the picker explaining WP preview behavior; use `psla-note` class for darker, readable text.
 * Docs: Add ClassicPress notes and FAQ.
 
