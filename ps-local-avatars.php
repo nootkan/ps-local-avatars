@@ -1,13 +1,12 @@
 <?php
 /**
  * Plugin Name: PS Local Avatars
- * Description: Local avatars with Gravatar fallback. Subscriber-safe uploads, per-site dimension caps, square crops, settings, shortcode, REST API, and role controls.
- * Version: 1.3.1
+ * Description: Local avatars with Gravatar fallback. Subscriber-safe uploads, per-site dimension caps, square crops, small serve for comments, role controls, settings, shortcode, and REST API.
+ * Version: 1.3.6
  * Requires at least: 5.6
  * Tested up to: 6.8.2
  * Requires PHP: 7.4
- * Author: Van Isle Web Solutions
- * Author URI: https://www.vanislebc.com/
+ * Author: Paul + ChatGPT
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: ps-local-avatars
@@ -31,6 +30,10 @@ class PS_Local_Avatars {
     }
 
     private function __construct() {
+        // Ensure profile forms accept file uploads
+        add_action('user_edit_form_tag', function(){ echo ' enctype="multipart/form-data"'; });
+        add_action('user_new_form_tag', function(){ echo ' enctype="multipart/form-data"'; });
+
         // Image sizes (read options early to allow configurable small size)
         add_action('init', function(){
             $opts = $this->get_options();
@@ -65,6 +68,13 @@ class PS_Local_Avatars {
 
         // Ensure small derivative can be generated on demand for legacy attachments
         add_filter('intermediate_image_sizes_advanced', [$this, 'maybe_add_sizes_during_meta'], 10, 2);
+		
+		// Ensure URL-based paths (Admin Bar / profile) use the local avatar
+        add_filter('get_avatar_url', [$this, 'psla_get_avatar_url'], 10, 3);
+
+        // In admin (and when Admin Bar is visible), force avatars "on" so CP can't short-circuit
+        add_filter('option_show_avatars', [$this, 'psla_force_admin_avatars']);
+
     }
 
     /** Options */
@@ -79,7 +89,6 @@ class PS_Local_Avatars {
             'disallow_media_roles'   => [], // role slugs
         ];
         $opts = get_option(self::OPT_KEY, []);
-        // Normalize array
         if (!empty($opts['disallow_media_roles']) && is_string($opts['disallow_media_roles'])) {
             $maybe = maybe_unserialize($opts['disallow_media_roles']);
             if (is_array($maybe)) $opts['disallow_media_roles'] = $maybe;
@@ -89,7 +98,6 @@ class PS_Local_Avatars {
 
     /** Allow dynamic sizes during metadata generation */
     public function maybe_add_sizes_during_meta($sizes, $metadata) {
-        // already handled by add_image_size(), but this ensures both sizes are considered
         $sizes['psla_avatar'] = ['width'=>512, 'height'=>512, 'crop'=>1];
         $opts = $this->get_options();
         $small = max(32, (int)$opts['small_square_px']);
@@ -107,15 +115,26 @@ class PS_Local_Avatars {
         }
         $allow_media = $this->allow_media_button_for_user($target_user);
 
+        // Always enqueue our script for preview/remove behavior (all roles)
+        wp_enqueue_script(
+            'psla-admin',
+            plugin_dir_url(__FILE__) . 'assets/admin.js',
+            ['jquery'],
+            '1.3.6',
+            true
+        );
+        // Pass constraints for optional client-side checks
+        $opts = $this->get_options();
+        wp_localize_script('psla-admin', 'PSLA', [
+            'maxKB' => (int) $opts['max_upload_kb'],
+            'maxW'  => (int) $opts['max_width_px'],
+            'maxH'  => (int) $opts['max_height_px'],
+            'mimes' => ['image/jpeg','image/png','image/gif','image/webp']
+        ]);
+
+        // Only load the Media Library if the button is allowed
         if ($allow_media) {
             wp_enqueue_media();
-            wp_enqueue_script(
-                'psla-admin',
-                plugin_dir_url(__FILE__) . 'assets/admin.js',
-                ['jquery'],
-                '1.3.0',
-                true
-            );
         }
     }
 
@@ -125,9 +144,7 @@ class PS_Local_Avatars {
         $disallowed = (array) $opts['disallow_media_roles'];
         $u = get_user_by('id', $target_user_id);
         if (!$u) return false;
-        // Must also have upload_files capability overall
         if (!current_user_can('upload_files')) return false;
-        // If the target user has any role in the disallowed list, hide the button
         $roles = (array) $u->roles;
         foreach ($roles as $r) {
             if (in_array($r, $disallowed, true)) return false;
@@ -135,7 +152,7 @@ class PS_Local_Avatars {
         return true;
     }
 
-    /** Profile UI (subscriber-safe file upload + optional media button) */
+    /** Profile UI */
     public function render_profile_ui($user) {
         if (!$user instanceof WP_User) $user = get_user_by('id', (int)$user);
         if (!$user) return;
@@ -143,13 +160,15 @@ class PS_Local_Avatars {
         $opts      = $this->get_options();
         $avatar_id = (int) get_user_meta($user->ID, self::META_AVATAR_ID, true);
         $source    = get_user_meta($user->ID, self::META_SOURCE, true);
-
         if (!$source) {
             $source = $avatar_id ? ($opts['default_behavior'] === 'prefer_gravatar' ? 'gravatar' : 'uploaded') : 'gravatar';
         }
 
         $size = 128;
         $preview_url = $this->get_avatar_preview_url($user->ID, $avatar_id, $size);
+        $gravatar_url = get_avatar_url($user->ID, ['size' => $size]);
+        $uploaded_url = '';
+        if ($avatar_id) { $tmp = $this->image_downsize_with_regen($avatar_id, 'psla_avatar'); if ($tmp) { $uploaded_url = $tmp[0]; } }
         $max_kb = (int) $opts['max_upload_kb'];
         $max_w  = (int) $opts['max_width_px'];
         $max_h  = (int) $opts['max_height_px'];
@@ -162,7 +181,7 @@ class PS_Local_Avatars {
                     <th><label><?php esc_html_e('Current Avatar', 'ps-local-avatars'); ?></label></th>
                     <td>
                         <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                            <img id="psla-avatar-preview" src="<?php echo esc_url($preview_url); ?>"
+                            <img id="psla-avatar-preview" src="<?php echo esc_url($preview_url); ?>" data-default-src="<?php echo esc_url($preview_url); ?>" data-gravatar-src="<?php echo esc_url($gravatar_url); ?>" data-uploaded-src="<?php echo esc_url($uploaded_url); ?>"
                                  alt="<?php echo esc_attr($user->display_name); ?>" width="<?php echo (int)$size; ?>" height="<?php echo (int)$size; ?>"
                                  style="border-radius:50%; box-shadow:0 0 0 1px #ccd0d4; background:#fff;" />
                             <div style="min-width:320px;">
@@ -179,12 +198,21 @@ class PS_Local_Avatars {
                                 </p>
                                 <input type="hidden" name="psla_avatar_id" id="psla-avatar-id" value="<?php echo esc_attr($avatar_id ?: ''); ?>" />
                                 <?php wp_nonce_field('psla_save_avatar', 'psla_nonce'); ?>
-                                <p class="description">
+								<p class="psla-note" style="margin-top:.5em; padding:.4em .6em; border-left:3px solid #72aee6; background:#f6fbff;">
+                                <strong>Heads up:</strong> In WordPress, the Gravatar preview may not change when you click <strong>“Remove”</strong> until you press <em>Update User</em>. That’s normal — your Gravatar and profile
+                                 picture will update after saving. In ClassicPress you might see the preview dim immediately to let you know it's going to be removed upon clicking "Update User".
+                                </p>
+                                <p class="psla-note">
                                     <?php
-                                    printf(
-                                        esc_html__('Square images look best. Max file size: %1$d KB. Max dimensions: %2$d×%3$d px (oversized uploads are downscaled). Allowed types: JPG, PNG, GIF, WEBP.', 'ps-local-avatars'),
-                                        $max_kb, $max_w, $max_h
+                                    /* translators: 1: max KB, 2: max width px, 3: max height px */
+                                    $message = sprintf(
+                                        esc_html__( 'Square images look best. Max file size: %1$d KB. Max dimensions: %2$dx%3$d px (oversized uploads are downscaled). Allowed types: JPG, PNG, GIF, WEBP.', 'ps-local-avatars' ),
+                                        (int) $max_kb,
+                                        (int) $max_w,
+                                        (int) $max_h
                                     );
+                                    $reminder = esc_html__( 'Don\'t forget to click "Update User" to save your Gravatar.', 'ps-local-avatars' );
+                                    echo esc_html( $message ) . '<br><strong>' . $reminder . '</strong>';
                                     ?>
                                 </p>
                             </div>
@@ -276,7 +304,7 @@ class PS_Local_Avatars {
         update_user_meta($user_id, self::META_SOURCE, $source);
     }
 
-    /** Return preview URL using square size (small for preview is fine too) */
+    /** Return preview URL using square size */
     private function get_avatar_preview_url($user_id, $avatar_id, $size) {
         if ($avatar_id) {
             $img = $this->image_downsize_with_regen($avatar_id, 'psla_avatar');
@@ -290,7 +318,6 @@ class PS_Local_Avatars {
         $img = image_downsize($attachment_id, $size_name);
         if ($img && !is_wp_error($img)) return $img;
 
-        // Try to generate it once if missing
         $file = get_attached_file($attachment_id);
         if (!$file || !file_exists($file)) return false;
 
@@ -307,7 +334,6 @@ class PS_Local_Avatars {
         $resized = $editor->save();
         if (is_wp_error($resized)) return false;
 
-        // Update metadata with a named size so WP can find it next time
         $meta = wp_get_attachment_metadata($attachment_id);
         if (!$meta) $meta = [];
         if (!isset($meta['sizes'])) $meta['sizes'] = [];
@@ -319,7 +345,6 @@ class PS_Local_Avatars {
         ];
         wp_update_attachment_metadata($attachment_id, $meta);
 
-        // Build URL
         $uploads = wp_get_upload_dir();
         $url = trailingslashit($uploads['baseurl']) . _wp_relative_upload_path($resized['path']);
         return [$url, $resized['width'], $resized['height'], true];
@@ -330,15 +355,9 @@ class PS_Local_Avatars {
         $user = $this->resolve_user($id_or_email);
         if (!$user) return $args;
 
-        $opts = $this->get_options();
         $avatar_id = (int) get_user_meta($user->ID, self::META_AVATAR_ID, true);
-        $source    = get_user_meta($user->ID, self::META_SOURCE, true);
-        if (!$source) {
-            $source = $avatar_id ? ($opts['default_behavior'] === 'prefer_gravatar' ? 'gravatar' : 'uploaded') : 'gravatar';
-        }
-        if ($source !== 'uploaded' || !$avatar_id) return $args;
-
-        $size = isset($args['size']) ? (int)$args['size'] : 96;
+        if (!$avatar_id) return $args;
+$size = isset($args['size']) ? (int)$args['size'] : 96;
         $use_small = false;
         if (!is_admin() && $opts['serve_small_in_comments'] && $this->is_comment_context($id_or_email)) {
             $use_small = true;
@@ -439,14 +458,14 @@ class PS_Local_Avatars {
         add_settings_field('psla_max_upload_kb', __('Max file size (KB)', 'ps-local-avatars'), function(){
             $opts = $this->get_options();
             ?>
-            <input type="number" min="50" step="10" name="<?php echo esc_attr(self::OPT_KEY); ?>[max_upload_kb]" value="<?php echo esc_attr((int)$opts['max_upload_kb']); ?>">
+            <input type="number" min="50" step="1" name="<?php echo esc_attr(self::OPT_KEY); ?>[max_upload_kb]" value="<?php echo esc_attr((int)$opts['max_upload_kb']); ?>">
             <?php
         }, 'psla-settings', 'psla_general');
 
         add_settings_field('psla_max_dims', __('Max dimensions (px)', 'ps-local-avatars'), function(){
             $opts = $this->get_options();
             ?>
-            <input type="number" min="64" step="1" name="<?php echo esc_attr(self::OPT_KEY); ?>[max_width_px]" value="<?php echo esc_attr((int)$opts['max_width_px']); ?>" style="width:90px;"> ×
+            <input type="number" min="64" step="1" name="<?php echo esc_attr(self::OPT_KEY); ?>[max_width_px]" value="<?php echo esc_attr((int)$opts['max_width_px']); ?>" style="width:90px;"> x
             <input type="number" min="64" step="1" name="<?php echo esc_attr(self::OPT_KEY); ?>[max_height_px]" value="<?php echo esc_attr((int)$opts['max_height_px']); ?>" style="width:90px;">
             <p class="description"><?php esc_html_e('Oversized uploads are downscaled before saving.', 'ps-local-avatars'); ?></p>
             <?php
@@ -488,7 +507,7 @@ class PS_Local_Avatars {
         }
         if (isset($input['max_upload_kb'])) {
             $kb = (int)$input['max_upload_kb'];
-            $out['max_upload_kb'] = max(50, min($kb, 10240)); // 50 KB .. 10 MB
+            $out['max_upload_kb'] = max(50, min($kb, 10240));
         }
         if (isset($input['max_width_px'])) $out['max_width_px'] = max(64, min((int)$input['max_width_px'], 4096));
         if (isset($input['max_height_px'])) $out['max_height_px'] = max(64, min((int)$input['max_height_px'], 4096));
@@ -566,10 +585,11 @@ class PS_Local_Avatars {
         return get_avatar($user_arg, $size, '', $alt, $args);
     }
 
-    /* ===================== REST API (same as 1.2.0) ===================== */
+    /* ===================== REST API ===================== */
 
     public function register_rest_routes() {
         $ns = 'psla/v1';
+
         register_rest_route($ns, '/avatar', [
             'methods'  => WP_REST_Server::CREATABLE,
             'args'     => ['user_id'=>['type'=>'integer','required'=>false]],
@@ -698,6 +718,38 @@ class PS_Local_Avatars {
         $url = get_avatar_url($user_id, ['size'=>128]);
         return new WP_REST_Response(['success'=>true, 'source'=>$source, 'avatar'=>$url], 200);
     }
+	
+	// Return a local avatar URL on all code paths (covers ClassicPress Admin Bar/profile)
+    public function psla_get_avatar_url($url, $id_or_email, $args) {
+        $user = $this->resolve_user($id_or_email);
+        if (!$user) return $url;
+
+       $avatar_id = (int) get_user_meta($user->ID, self::META_AVATAR_ID, true);
+       if (!$avatar_id) return $url;
+
+       $size = isset($args['size']) ? (int) $args['size'] : 96;
+
+    // Prefer our named sizes; fall back gracefully
+       $opts = $this->get_options();
+       $use_small = (!is_admin() && !empty($opts['serve_small_in_comments']) && $size <= 96 && $this->is_comment_context($id_or_email));
+
+       $img = $this->image_downsize_with_regen($avatar_id, $use_small ? 'psla_avatar_small' : 'psla_avatar');
+       if (!$img) {
+        $img = image_downsize($avatar_id, [$size, $size]);
+    }
+       if (is_array($img) && !empty($img[0])) return $img[0];
+
+       $full = wp_get_attachment_image_src($avatar_id, 'full');
+       return ($full && !empty($full[0])) ? $full[0] : $url;
+}
+
+// Keep avatars visible in admin pages and when the Admin Bar shows (ClassicPress safeguard)
+public function psla_force_admin_avatars($value) {
+    if (is_admin()) return 1;
+    if (function_exists('is_admin_bar_showing') && is_admin_bar_showing()) return 1;
+    return $value;
+}
+
 }
 
 PS_Local_Avatars::instance();
