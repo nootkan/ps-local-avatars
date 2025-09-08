@@ -2,11 +2,12 @@
 /**
  * Plugin Name: PS Local Avatars
  * Description: Local avatars with Gravatar fallback. Subscriber-safe uploads, per-site dimension caps, square crops, small serve for comments, role controls, settings, shortcode, and REST API.
- * Version: 1.3.6
+ * Version: 1.3.7
  * Requires at least: 5.6
  * Tested up to: 6.8.2
  * Requires PHP: 7.4
- * Author: Paul + ChatGPT
+ * Author: Van Isle Web Solutions
+ * Author URI: https://www.vanislebc.com/
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain: ps-local-avatars
