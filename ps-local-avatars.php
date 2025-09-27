@@ -359,11 +359,17 @@ class PS_Local_Avatars {
         $avatar_id = (int) get_user_meta($user->ID, self::META_AVATAR_ID, true);
         if (!$avatar_id) return $args;
         $size = isset($args['size']) ? (int)$args['size'] : 96;
-		$opts = $this->get_options();
+
+    // Get plugin options safely (supports either a cached property or a getter)
+        $opts = isset($this->options) && is_array($this->options)
+        ? $this->options
+        : (method_exists($this, 'get_options') ? (array) $this->get_options() : []);
+
+    // Only serve the small size in comments if the option is enabled
         $use_small = false;
-        if (!is_admin() && $opts['serve_small_in_comments'] && $this->is_comment_context($id_or_email)) {
-            $use_small = true;
-        }
+        if (!is_admin() && !empty($opts['serve_small_in_comments']) && $this->is_comment_context($id_or_email)) {
+        $use_small = true;
+    }
         $img = $this->image_downsize_with_regen($avatar_id, $use_small ? 'psla_avatar_small' : 'psla_avatar');
         if (!$img) {
             $img = image_downsize($avatar_id, [$size, $size]);
